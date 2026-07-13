@@ -9,7 +9,10 @@ plus a few schema-specific traps. Run through this before submitting.
 - [ ] Parameters use **`$(inputs.x)`** / **`$(inputs.x.path)`**, not Cheetah `$x` or `#for#`.
 - [ ] `container` is a **plain string** of a **real** image (verified biocontainer when possible).
 - [ ] Every output has **`from_work_dir`** or **`discover_datasets`** (collections: `discover_datasets`).
+- [ ] Outputs are captured by file (`from_work_dir`/`discover_datasets`); there is **no** `$(outputs.X.path)`.
 - [ ] Every `$(inputs.X)` reference has a matching declared input named `X`.
+- [ ] If `shell_command` runs a script by name (`python script.py`), a `configfiles` entry creates that exact filename -- otherwise inline it with `python -c` / `Rscript -e`.
+- [ ] No `min`/`max` on a `data` input (it's already required; use `optional: true` to relax, `multiple: true` for a list).
 - [ ] `id` matches `^[a-z][a-z0-9_-]*$`; `name` is at least 5 characters.
 - [ ] No rejected fields: `truevalue`, `falsevalue`, `argument`, `parameter_type`, `${on_string}`, `${tool.name}`.
 - [ ] Booleans become flags via a ternary, not `truevalue`/`falsevalue`.
@@ -28,8 +31,11 @@ plus a few schema-specific traps. Run through this before submitting.
 | `'$(inputs.reads)'` for a data input | A data input is an object, not a path. | `'$(inputs.reads.path)'`. |
 | `container: {type: docker, image: ...}` | `container` is a plain string. | `container: quay.io/biocontainers/...`. |
 | Output written to `'$(inputs.out)'` / a templated output path | UDTs don't pass output paths in; the file is claimed afterward. | Write to a fixed filename, then `from_work_dir: that-file`. |
+| `$(outputs.name.path)` in the command | There is no `outputs` object in the template namespace -- only `inputs`. | Write to a fixed filename and claim it with `from_work_dir`/`discover_datasets`. |
+| `python script.py` with no `configfiles` entry named `script.py` | The file is never created in the working dir, so the command fails at runtime (lint won't catch it). | Add a `configfiles` entry whose `filename` is exactly `script.py`, or inline the code with `python -c`. |
 | Output with neither `from_work_dir` nor `discover_datasets` | `dynamic_tool.output_unclaimed`. | Add one of them. |
 | `$(inputs.foo)` but no input `foo` | `dynamic_tool.undeclared_input_ref`. | Declare `foo` or fix the typo. |
+| `min: 1` / `max: N` on a `data` input | Dropped from the schema in 26.1 (`extra="forbid"` rejects them); authors used `min: 1` to mean "required," but data inputs already are. | Remove them. Data inputs are required by default (`optional: true` to relax); use `multiple: true` to accept several. |
 | `truevalue: --x` / `falsevalue: ""` on a boolean | XML-only fields, rejected. | `value: false` + `$(inputs.x ? '--x' : '')` in the command. |
 | `${on_string}`, `${tool.name}` in labels | Cheetah macros; not supported. | Use a plain string label, or `format_source` to inherit. |
 | `id: My_Tool` / `id: 2pass` | Must be lowercase and start with a letter (`string_pattern_mismatch`). | `id: my-tool`, `id: two-pass`. |
@@ -47,6 +53,9 @@ schema/lint never check that the image exists. Real case: a plotting UDT declare
 `quay.io/biocontainers/seaborn:0.13.2--pyhd8ed1ab_3`, was accepted by `create_user_tool`, and the
 job died with `manifest unknown` because that exact build tag didn't exist on quay.
 
+- **Resolve a verified image instead of guessing.** Call `recommend_biocontainer` (Galaxy MCP) with
+  the conda packages (`["samtools=1.17", "bwa"]`) and use the `image` it returns, or run
+  `mulled-recommend samtools=1.17` in a terminal -- both check quay.io rather than hallucinating.
 - **Never guess the biocontainers build suffix** (`--<hash>_<build>`) -- it isn't derivable from the
   version number. Look it up: browse `https://quay.io/repository/biocontainers/<tool>?tab=tags` or
   query `https://quay.io/api/v1/repository/biocontainers/<tool>/tag/?onlyActiveTags=true`.
@@ -54,7 +63,8 @@ job died with `manifest unknown` because that exact build tag didn't exist on qu
   write the logic inline -- there's no third-party tag to get wrong. The seaborn failure above was
   fixed precisely this way: switch to `python:3.11-slim` and emit SVG with the standard library.
 - **A clean `validate.py` does not mean the image pulls.** Lint validates the YAML, not the
-  registry. Verify the image separately, or let the server-create + first run confirm it.
+  registry. Verify the image separately -- `validate.py --check-container`, `recommend_biocontainer`,
+  or `mulled-recommend` -- or let the server-create + first run confirm it.
 
 ## Clarity pass (what a deterministic validator can't catch)
 

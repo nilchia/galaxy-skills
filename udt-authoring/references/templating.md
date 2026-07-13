@@ -108,12 +108,26 @@ shell_command: |
 runtime, but they aren't covered by the official UDT docs -- confirm on your target server before
 relying on them.
 
-## Embedding a script (heredoc)
+## Running a script
 
-For logic beyond a one-liner, embed a script with a shell heredoc and reference inputs with
-`$(inputs.x)` inside it. Galaxy expands the `$(...)` expressions **before** the shell runs, so a
-quoted heredoc (`<<'PY'`) is correct -- it stops the shell from re-expanding things, while Galaxy
-has already substituted the inputs:
+You have three ways to run script logic. Pick one and complete it fully -- a `shell_command` that
+*names* a script file with nothing that creates it is the most common broken-but-lint-clean tool
+(the file won't exist at runtime, and lint can't catch it).
+
+**1. One-liner: inline it with `python -c` / `Rscript -e`.** Self-contained, nothing else to
+declare; reference inputs directly:
+
+```yaml
+container: quay.io/biocontainers/pandas:2.1.1
+shell_command: >-
+  python -c "import pandas as pd; d = pd.read_csv('$(inputs.table.path)', sep='\t');
+  d.describe().to_csv('summary.tsv', sep='\t')"
+```
+
+**2. A few lines: embed it with a quoted heredoc.** Reference inputs with `$(inputs.x)` inside.
+Galaxy expands the `$(...)` expressions **before** the shell runs, so a quoted heredoc (`<<'PY'`)
+is correct -- it stops the shell from re-expanding things, while Galaxy has already substituted the
+inputs:
 
 ```yaml
 container: python:3.11-slim          # an inline Python script needs only a base Python image
@@ -155,3 +169,28 @@ shell_command: |
 
 Input references inside a configfile count toward `dynamic_tool.undeclared_input_ref`, same as in
 `shell_command`.
+
+**3. Longer script: put it in a `configfiles` entry and run that file by name.** The file is
+materialized in the working directory at `filename`, so `shell_command` runs it by that name:
+
+```yaml
+configfiles:
+  - filename: script.py
+    content: |
+      import pandas as pd
+      df = pd.read_csv("$(inputs.table.path)", sep="\t")
+      df.describe().to_csv("summary.tsv", sep="\t")
+shell_command: python script.py
+```
+
+> **CRITICAL:** if `shell_command` runs a script by name (`python script.py`), you **must** include
+> a `configfiles` entry whose `filename` is exactly that name. `python script.py` with no configfile
+> that creates it is broken -- the file won't exist at runtime, and neither lint nor `create_user_tool`
+> will catch it. If you don't want a configfile, inline the script with `python -c` (option 1) instead.
+
+**Don't interpolate a free-text input straight into script *source*.** Inlining `$(inputs.name)`
+into Python/R code (heredoc or configfile) has the same problem as inlining it into `shell_command`:
+a quote, backslash, or newline in a `text`/`select` value breaks the script or injects code. Data
+`.path` values are Galaxy-generated and safe to inline; user-controlled text is not. For text, write
+it to a JSON configfile with `$(JSON.stringify(inputs.name))` (which safely encodes any string) and
+read it back as data in the script -- see `examples/08-configfile-script.yml`.
