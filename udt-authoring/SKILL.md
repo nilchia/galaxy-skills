@@ -3,7 +3,7 @@ name: udt-authoring
 description: "Use when authoring a Galaxy User-Defined Tool (UDT) -- a `class: GalaxyUserTool` YAML definition that wraps a container and command into a tool a non-admin user creates and runs (e.g. via Galaxy MCP create_user_tool / run_user_tool, or POST /api/unprivileged_tools). Not for classic XML/ToolShed tool wrappers."
 metadata:
   surfaces: [loom]
-version: 1.0.0
+version: 1.1.0
 tags: [galaxy, tools, udt, user-defined-tools, custom-tool]
 ---
 
@@ -51,7 +51,7 @@ If you find yourself writing `command:`, `$param`, `#for#`, `truevalue:`, or `${
 ```yaml
 class: GalaxyUserTool          # required, exactly this
 id: my-tool                    # lowercase, ^[a-z][a-z0-9_-]*$, 3-255 chars (recommended)
-version: "0.1.0"               # recommended
+version: "0.1.0"               # required -- schema validation rejects a versionless tool
 name: My Tool                  # required, min 5 chars
 description: One line shown in the tool menu
 container: quay.io/biocontainers/seqkit:2.8.2--h9ee0642_0   # required STRING, a real image
@@ -76,12 +76,12 @@ Templating syntax (`$(inputs.x)`, arrays, `$GALAXY_SLOTS`, escaping): **`referen
 ## Authoring Workflow
 
 1. **Understand the command.** What binary runs, what inputs it consumes, what files it produces.
-2. **Pick a real container** -- this is the #1 cause of runtime failure. Prefer a verified
-   biocontainer (`quay.io/biocontainers/<tool>:<tag>`), but **never guess the `--<hash>_<build>`
-   tag suffix** -- it is not predictable. Look up the real tag, or, when the tool needs only the
-   Python standard library, use an official `python:3.x-slim` image and write the logic inline.
-   **Do not invent an image or flag you cannot verify** -- ask instead. See "Choosing a container"
-   below. Lint will *not* catch a bad image; the job simply fails to pull it.
+2. **Pick a real container** -- this is the #1 cause of runtime failure. Resolve a verified image
+   with `recommend_biocontainer` (Galaxy MCP) or the `mulled-recommend` CLI rather than guessing;
+   **never invent the `--<hash>_<build>` tag suffix** -- it is not predictable. For stdlib-only
+   logic, use an official `python:3.x-slim` image and write the code inline. **Do not invent an
+   image or flag you cannot verify** -- ask instead. See "Choosing a Container" below. Lint will
+   *not* catch a bad image; the job simply fails to pull it.
 3. **Draft the definition** using `references/schema-reference.md`. Reference each input as
    `$(inputs.name.path)` (data) or `$(inputs.name)` (scalar). Write outputs to fixed filenames and
    claim them with `from_work_dir` / `discover_datasets`. Always include a `help` block (convention
@@ -99,15 +99,30 @@ that declared `quay.io/biocontainers/seaborn:0.13.2--pyhd8ed1ab_3` was accepted 
 `create_user_tool`, then the job died with `manifest unknown` -- that exact build tag did not exist
 on quay. Guard against it:
 
-- **Don't guess the biocontainers build suffix** (`--<hash>_<build>`). It is not derivable from the
-  version. Look up the real tag: browse `https://quay.io/repository/biocontainers/<tool>?tab=tags`
-  or query `https://quay.io/api/v1/repository/biocontainers/<tool>/tag/?onlyActiveTags=true`.
+- **Resolve a verified image instead of guessing one -- do this first.** If a
+  `recommend_biocontainer` tool is available (Galaxy MCP), call it with the conda packages your
+  command needs -- e.g. `["samtools=1.17", "bwa"]` -- and use the `image` it returns. It's resolved
+  and checked against quay.io rather than hallucinated, so it can't invent a nonexistent tag. A
+  single package yields a single-package image; several yield a mulled-v2 image. The returned
+  `match_quality` tells you whether the exact version matched (`exact_version`) or only the name did
+  (`name_only`, newest tag used), and `verified` confirms the tag is actually built. Only auto-apply
+  an `exact_version` result; if it comes back `name_only` and the exact version matters, review the
+  substituted tag before using it. From a terminal,
+  the same resolver is the **`mulled-recommend`** CLI in `galaxy-tool-util`:
+  `mulled-recommend samtools=1.17`, `mulled-recommend --json "bwa,samtools"`.
+- **If you must pick by hand, don't guess the biocontainers build suffix** (`--<hash>_<build>`). It
+  is not derivable from the version. Look up the real tag: browse
+  `https://quay.io/repository/biocontainers/<tool>?tab=tags` or query
+  `https://quay.io/api/v1/repository/biocontainers/<tool>/tag/?onlyActiveTags=true`.
 - **For a stdlib-only tool, skip biocontainers entirely.** Use an official base image like
   `python:3.11-slim` (or `busybox` for shell-only) and write the logic inline (see the heredoc
   pattern in `references/templating.md`). The seaborn failure above was fixed exactly this way:
   switch to `python:3.11-slim` and emit SVG with the standard library, no third-party image to get
-  wrong.
-- **Never invent an image, tag, or CLI flag you can't verify** -- ask the user rather than guessing.
+  wrong. (A bare language image ships no third-party libraries -- `python:3.13` cannot `import
+  pandas` -- so this is only for genuinely stdlib-only logic; otherwise resolve a package image
+  above.)
+- **Never invent an image, tag, or CLI flag you can't verify** -- resolve it (above) or ask the user
+  rather than guessing.
 
 ## Write a `help` block (convention)
 
@@ -142,8 +157,14 @@ Validation logic is pure Python in `galaxy-tool-util` -- the same code the serve
 check offline before submitting. Three tiers, weakest to strongest:
 
 1. **Local** (fast, offline, side-effect-free): `python scripts/validate.py my-tool.yml`. Needs
-   `pip install galaxy-tool-util`. Catches structural errors, the four semantic validators, and
+   `pip install 'galaxy-tool-util>=26.1'`. Catches structural errors, the four semantic validators, and
    lint warnings. Use this whenever a Python env is available (terminal, CI). See `scripts/`.
+   **Version-sensitive:** the installed galaxy-tool-util *is* the schema, and the 26.1 behaviors this
+   skill describes (data inputs rejecting `min`/`max`, a minimal `discover_datasets`,
+   `--check-container`) need galaxy-tool-util **26.1+** -- so install
+   `pip install 'galaxy-tool-util>=26.1'`. On an older install the same file validates against the
+   older schema, which is a different answer, not a wrong one: if your target server is older, that
+   *is* the schema you're writing against. Either way the server create (tier 3) is the final word.
 2. **`planemo lint`** -- not available yet (planemo does not lint UDTs as of this writing). It
    already depends on `galaxy-tool-util`, so teaching it to lint a `GalaxyUserTool` YAML would be a
    small addition, and it's the natural future home for tier 1. Down the road `scripts/validate.py`
@@ -154,13 +175,14 @@ check offline before submitting. Three tiers, weakest to strongest:
    role). This is the final word, and the practical gate for environments without Python (e.g.
    Loom): submit, then iterate on the returned errors.
 
-> **Lint-clean is necessary but not sufficient.** No check here -- not validate.py, not the server's
-> create lint -- verifies that the container image actually pulls or that the command succeeds.
-> Those only surface when the job runs. A nonexistent container tag (`manifest unknown` at run
-> time) is the most common real-world UDT failure, so verify the image (see "Choosing a Container")
-> before relying on a clean validation. It also can't see runtime JS-expression errors, shell
-> quoting, the server's role/config gates, or whether the command actually produces the declared
-> outputs -- only running the tool does.
+> **Lint-clean is necessary but not sufficient.** Neither validate.py nor the server's create lint
+> checks that the command actually succeeds. The one thing you *can* check ahead of time is the
+> container: a nonexistent tag (`manifest unknown` at run time) is the most common real-world UDT
+> failure, so resolve a verified image with `recommend_biocontainer` / `mulled-recommend` (see
+> "Choosing a Container") -- or run `validate.py --check-container` to test the tag you already have.
+> Beyond that, validation can't see runtime JS-expression errors, shell quoting, the server's
+> role/config gates, or whether the command produces the declared outputs -- only running the tool
+> does.
 
 ## Iterating & Cleanup
 
@@ -195,7 +217,7 @@ inside the container.
 | Capture many outputs | declare output `type: collection` with `discover_datasets` |
 | Run a non-trivial inline script | `python <<'PY'` ... `PY` heredoc; reference inputs as `$(inputs.x)` inside (see `references/templating.md`) |
 
-See `examples/` for seven complete, validated UDTs spanning these patterns.
+See `examples/` for eight complete, validated UDTs spanning these patterns.
 
 ## Troubleshooting
 
@@ -206,7 +228,7 @@ See `examples/` for seven complete, validated UDTs spanning these patterns.
 | `dynamic_tool.blank_container` | `container` empty / missing | Set a real container image string |
 | `string_pattern_mismatch` on `id` | Uppercase, leading digit, spaces | Use `^[a-z][a-z0-9_-]*$` |
 | extra-field rejection | XML-ism like `truevalue`, `command`, `${on_string}` | Remove it -- schema is `extra="forbid"` |
-| `manifest unknown` / `Unable to find image` at **run** time | Container tag doesn't exist on the registry | Use a real, verified tag (or `python:3.x-slim` for stdlib tools) -- lint can't catch this |
+| `manifest unknown` / `Unable to find image` at **run** time | Container tag doesn't exist on the registry | Resolve a verified image with `recommend_biocontainer` / `mulled-recommend` (or `python:3.x-slim` for stdlib tools) -- lint can't catch this |
 | HTTP 403 "not allowed to run unprivileged" | The admin's job routing (TPV) rejects `tool_type_user_defined` by default | Not fixable client-side -- the admin must add a destination/routing rule for user-defined tools |
 | `help` rejected at create | `help` sent as a bare string | Use the object form: `help: {format, content}` |
 
@@ -218,6 +240,6 @@ Full list with the why behind each: `references/common-mistakes.md`.
 - `references/templating.md` -- the `$(...)` ECMAScript model, arrays, `$GALAXY_SLOTS`, escaping
 - `references/common-mistakes.md` -- pre-submit self-review checklist
 - `scripts/validate.py` -- offline validate + lint via `galaxy-tool-util`
-- `examples/` -- seven complete UDTs, simple to complex (incl. an inline-script `python:slim` tool)
+- `examples/` -- eight complete UDTs, simple to complex (incl. inline-script and configfile-script `python:slim` tools)
 - Galaxy docs: [User-Defined Tools](https://docs.galaxyproject.org/en/master/admin/user_defined_tools.html)
 - For classic XML tools instead: the `tool-dev` skill.
