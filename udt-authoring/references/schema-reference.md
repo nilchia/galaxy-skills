@@ -4,6 +4,11 @@ The canonical schema for a UDT is the `UserToolSource` Pydantic model in
 `galaxy-tool-util` (`galaxy.tool_util_models`). It is `extra="forbid"`: **any unknown field is
 rejected at parse time.** Field names below are exact.
 
+When you submit via `create_user_tool` / `POST /api/unprivileged_tools`, the server validates this
+full `UserToolSource`, so everything here applies. (Galaxy's *in-app* authoring agent targets a
+slimmed view of the same model that drops the `tests` block to shrink its structured-output schema;
+`tests` is optional either way and usually skipped for a first version.)
+
 ## Top-level fields
 
 | Field | Required | Type | Notes |
@@ -13,7 +18,7 @@ rejected at parse time.** Field names below are exact.
 | `container` | **yes** | string | Container image, e.g. `quay.io/biocontainers/seqkit:2.8.2--h9ee0642_0`. A plain **string**, never a dict/list. Not blank. |
 | `shell_command` | **yes** | string | Command with `$(...)` expressions. The field is `shell_command`, not `command`. |
 | `id` | no (recommended) | string | Pattern `^[a-z][a-z0-9_-]*$`, length 3-255. Lowercase, starts with a letter; hyphens and underscores allowed. |
-| `version` | no (recommended) | string | e.g. `"0.1.0"`. Not blank/whitespace. Quote it so YAML doesn't read it as a number. |
+| `version` | **yes** | string | e.g. `"0.1.0"`. Required on 26.1+ -- a versionless tool fails schema validation with `version: Field required`. Not blank/whitespace; quote it so YAML doesn't read it as a number. |
 | `description` | no | string | Short line in the tool menu. |
 | `inputs` | no (default `[]`) | list | Input parameters (see below). |
 | `outputs` | no (default `[]`) | list | Output definitions (see below). |
@@ -38,7 +43,7 @@ Beyond those, each type supports:
 | `text` | `value`, `area` (bool), `validators` (`length`, `regex`, `empty_field`) |
 | `select` | `options` (static, non-empty), `multiple`, `validators` (`no_options`) |
 | `color` | `value` |
-| `data` | `format` (string or list of datatypes), `multiple`, `min`, `max` |
+| `data` | `format` (string or list of datatypes), `multiple` |
 | `data_collection` | `collection_type` (e.g. `list`, `paired`), `format` |
 
 `select` options are a list of `{label, value, selected}`:
@@ -58,6 +63,13 @@ and `whens`), `repeat` (has `parameters`, `min`, `max`), `section` (has `paramet
 `data_column`, `genomebuild`, `group_tag`, `baseurl`, `rules`, `directory`. **Rejected fields on
 any parameter:** `truevalue`, `falsevalue`, `argument`, `is_dynamic`, `hidden`, `parameter_type`.
 
+**`min`/`max` on a `data` input are rejected** (dropped from the authoring schema in Galaxy 26.1).
+They only ever meant the min/max *number of selected datasets* for a `multiple` input, and the
+runtime rejects them on a single one. Authors reached for `min: 1` to mean "required" -- but a
+`data` input is already required (add `optional: true` to make it *not* required). Use `multiple:
+true` to accept a list; never add `min`/`max` to a data input. (`min`/`max` stay valid on
+`integer`/`float`, where they bound the numeric value.)
+
 ## Output types
 
 Every output has `name` and `type`. **A dataset output must declare `from_work_dir` OR
@@ -76,10 +88,9 @@ Every output has `name` and `type`. **A dataset output must declare `from_work_d
 | `discover_datasets` | Alternative to `from_work_dir` for pattern-matched files. |
 
 **Collection output** (`type: collection`): `collection_type` (`list`, `paired`, ...) plus
-`discover_datasets` (required). Discovery is either a `pattern` or `tool_provided_metadata`. The
-`UserToolSource` model does **not** default the discovery fields, so a bare `[{pattern: ...}]` fails
-validation -- a pattern entry needs all of `discover_via`, `pattern`, `directory`, `format`,
-`visible`, `recurse`, `match_relative_path`, `assign_primary_output`, `sort_key`, `sort_comp`:
+`discover_datasets` (required). Discovery is either a `pattern` or `tool_provided_metadata`. On
+Galaxy 26.1+ every discovery field except the pattern has a sensible default, so a minimal entry
+validates -- you only supply `pattern`:
 
 ```yaml
 outputs:
@@ -87,21 +98,28 @@ outputs:
     type: collection
     collection_type: list
     discover_datasets:
-      - discover_via: pattern
-        pattern: 'part_(?P<designation>.+)\.txt'   # named groups: designation, ext, dbkey
-        directory: outdir
-        format: txt
-        visible: false
-        recurse: false
-        match_relative_path: false
-        assign_primary_output: false
-        sort_key: filename        # filename | name | designation | dbkey
-        sort_comp: lexical        # lexical | numeric
+      - pattern: 'part_(?P<designation>.+)\.txt'   # named groups: designation, ext, dbkey
 ```
 
-**Only `data` and `collection` outputs are supported.** The scalar output types present in the
-underlying model (`ToolOutputText`/`Integer`/`Float`/`Boolean`) are rejected by the UDT YAML parser
--- don't use them.
+Add a field only to override its default. The ones you'll actually reach for: `directory` (search
+a subdir instead of the job root), `format`, `visible`, `recurse`, `sort_key` (`filename` | `name` |
+`designation` | `dbkey`), `sort_comp` (`lexical` | `numeric`). That's the common subset, not the
+full list -- `discover_via`, `match_relative_path`, `assign_primary_output` and `sort_reverse` are
+also accepted; consult the model for the rest. The descriptor is `extra="forbid"`, so a mistyped key
+(`patern`) or an XML-only one (`sort_by`, `dbkey`) is rejected, not silently ignored.
+
+> **Server-version note.** The minimal one-field form needs Galaxy 26.1+; older servers required
+> every field spelled out. To stay compatible with an older Galaxy, write the fully-specified form
+> -- `discover_via: pattern` plus `directory`, `format`, `visible`, `recurse`,
+> `match_relative_path`, `assign_primary_output`, `sort_key`, `sort_comp` alongside `pattern` --
+> which still validates everywhere.
+
+**Only `data` and `collection` outputs are usable.** They capture files into the history -- write
+your result to a file and claim it. The scalar output types (`text`/`integer`/`float`/`boolean`) do
+exist in the authoring model, and on 26.1 a named one validates without `hidden`, so `validate.py`
+will pass a tool that declares one. It still won't *run*: the YAML tool parser accepts only `data`
+and `collection` and raises `Unknown output_type [integer] encountered` on anything else. A clean
+validation is not a green light here -- use `data` or `collection`.
 
 ## Requirements
 
